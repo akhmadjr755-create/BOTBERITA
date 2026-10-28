@@ -1,5 +1,5 @@
 # bot.py
-# Bot Berita Finansial & Crypto - Versi Elegan
+# Bot Berita Finansial - Versi Final (Sistematis, Terstruktur, Nol Ambiguitas)
 # Mode: GitHub Actions
 
 import json
@@ -54,8 +54,10 @@ def is_paused():
 # 2. TELEGRAM API
 # ==========================================
 def send_telegram(text, parse_mode="HTML"):
+    # Batas maksimal Telegram 4096 karakter. Kita potong aman di 4000.
     if len(text) > 4000:
         text = text[:4000] + "\n\n... (dipotong)"
+    
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": config.TELEGRAM_CHAT_ID,
@@ -82,21 +84,13 @@ def send_error(msg):
 def upload_to_gist():
     if not config.GITHUB_TOKEN or not config.GIST_ID:
         return
-    
     try:
         history = load_json(HISTORY_PATH, [])
         state = load_json(STATE_PATH, {"last_runs": {}})
-        
-        combined_data = {
-            "history": history[-1000:],
-            "state": state
-        }
+        combined_data = {"history": history[-1000:], "state": state}
         
         content = json.dumps(combined_data, ensure_ascii=False, indent=2)
-        headers = {
-            "Authorization": f"token {config.GITHUB_TOKEN}",
-            "Accept": "application/vnd.github+json",
-        }
+        headers = {"Authorization": f"token {config.GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
         url = f"https://api.github.com/gists/{config.GIST_ID}"
         payload = {"files": {config.GIST_FILENAME: {"content": content}}}
         
@@ -111,12 +105,8 @@ def upload_to_gist():
 def download_from_gist():
     if not config.GITHUB_TOKEN or not config.GIST_ID:
         return
-    
     try:
-        headers = {
-            "Authorization": f"token {config.GITHUB_TOKEN}",
-            "Accept": "application/vnd.github+json",
-        }
+        headers = {"Authorization": f"token {config.GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
         url = f"https://api.github.com/gists/{config.GIST_ID}"
         r = requests.get(url, headers=headers, timeout=30)
         
@@ -143,7 +133,7 @@ def fetch_rss(url, source_name):
     items = []
     try:
         feed = feedparser.parse(url)
-        for entry in feed.entries[:15]:
+        for entry in feed.entries[:10]: # Batasi 10 teratas per sumber
             title = entry.get("title", "").strip()
             link = entry.get("link", "").strip()
             summary = entry.get("summary", "") or entry.get("description", "")
@@ -185,41 +175,38 @@ def dedupe(news_list):
     return unique
 
 # ==========================================
-# 5. AI ANALYSIS (GROQ)
+# 5. AI ANALYSIS (GROQ - STRICT JSON MODE)
 # ==========================================
-def analyze_with_groq(item):
-    prompt = f"""Kamu adalah analis berita finansial profesional untuk investor Indonesia.
-ATURAN WAJIB:
-1. SELURUH output HARUS dalam Bahasa Indonesia profesional dan lugas.
-2. DILARANG memakai emotikon dekoratif.
-3. DILARANG memakai format poin-poin (bullet points).
-4. Tulis dalam bentuk PARAGRAF MENGALIR yang padat fakta.
-5. JANGAN mengarang fakta. Kalau tidak ada tanggal, tulis "tanggal tidak disebutkan".
-
-Berita dari {item['source']}:
+def analyze_with_groq(item, previous_news=""):
+    konteks = f"Konteks berita sebelumnya: {previous_news}\n" if previous_news else ""
+    
+    prompt = f"""Kamu adalah analis finansial profesional. Jawab HANYA dalam format JSON valid, tanpa teks pembuka/penutup.
+{konteks}
+Berita baru dari {item['source']}:
 JUDUL: {item['title']}
-ISI: {item['summary'][:2000]}
+ISI: {item['summary'][:1000]}
 
-Tugas:
-- Ringkas isi berita dan ekstrak fakta kunci.
-- Jelaskan analisis dampak terhadap (a) Crypto, (b) Saham Global, (c) IHSG secara terpisah dalam bentuk paragraf.
-- Berikan skor sentimen pasar (-100 sampai +100).
+Tugasmu:
+1. "konteks": Cek apakah berita ini ada kaitannya dengan "Konteks berita sebelumnya". Jika ada, jelaskan kaitannya (maks 1 kalimat). Jika tidak ada, tulis "Berita baru".
+2. "crypto", "saham", "ihsg": Jelaskan dampaknya. MAKSIMAL 2 KALIMAT per poin. Harus to the point, tegas, langsung sebutkan alasannya.
+3. "sentimen": Beri angka integer dari -100 (sangat buruk) sampai 100 (sangat baik).
 
-Format output:
-RINGKASAN & FAKTA UTAMA:
-[paragraf]
-
-ANALISIS IMPACT MARKET:
-[paragraf]
-
-SENTIMEN PASAR: [angka]"""
+Format JSON wajib:
+{{
+  "konteks": "...",
+  "crypto": "...",
+  "saham": "...",
+  "ihsg": "...",
+  "sentimen": 0
+}}"""
 
     try:
         completion = groq_client.chat.completions.create(
             model=config.GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=1200
+            temperature=0.1,
+            max_tokens=400,
+            response_format={"type": "json_object"} 
         )
         return completion.choices[0].message.content.strip()
     except Exception as e:
@@ -227,11 +214,12 @@ SENTIMEN PASAR: [angka]"""
         return None
 
 def analyze_coin_fundamental(coin_data):
+    # (Sama seperti sebelumnya, tapi dipastikan tidak ada typo)
     desc = coin_data['desc'][:1000]
     if not desc:
         desc = "Tidak ada deskripsi di CoinGecko."
 
-    prompt = f"""Kamu adalah analis crypto netral. Tugasmu adalah menjelaskan secara OBJEKTIF tentang koin {coin_data['name']} ({coin_data['symbol']}) kepada seorang pemula.
+    prompt = f"""Kamu adalah analis crypto netral. Jelaskan secara OBJEKTIF koin {coin_data['name']} ({coin_data['symbol']}).
 JANGAN memberikan saran beli/jual. HANYA berikan informasi.
 
 Data dari CoinGecko:
@@ -267,30 +255,40 @@ PRO & KONTRA (FAKTA):
         return completion.choices[0].message.content.strip()
     except Exception as e:
         log(f"Groq Error coin analysis: {e}")
-        return "Gagal menganalisis fundamental (Kuota AI habis atau error)."
+        return "Gagal menganalisis fundamental."
 
 # ==========================================
-# 6. FORMATTING MESSAGES
+# 6. FORMATTING MESSAGES (STRICT)
 # ==========================================
 def format_news_message(item, analysis):
     if not analysis:
-        return f"<b>{item['source']} - {item['title']}</b>\n\nRINGKASAN:\n{item['summary'][:800]}\n\nAnalisis tidak tersedia.\n\nLink: {item['link']}"
+        return f"<b>{item['source']} - {item['title']}</b>\n\nAnalisis tidak tersedia.\n\nLink: {item['link']}"
 
-    score = 0
-    m = re.search(r"SENTIMEN PASAR:\s*([+-]?\d+)", analysis)
-    if m:
-        score = int(m.group(1))
-
-    body = re.sub(r"SENTIMEN PASAR:\s*[+-]?\d+\s*$", "", analysis).strip()
-    
-    if score > 20:
-        sent_status = f"Positif ({score})"
-    elif score < -20:
-        sent_status = f"Negatif ({score})"
-    else:
-        sent_status = f"Netral ({score})"
-
-    return f"<b>{item['source']} - {item['title']}</b>\n\n{body}\n\nSENTIMEN: {sent_status}\n\nLink: {item['link']}"
+    try:
+        data = json.loads(analysis)
+        score = int(data.get("sentimen", 0))
+        
+        if score > 20:
+            sent_status = f"🟢 Positif ({score})"
+        elif score < -20:
+            sent_status = f"🔴 Negatif ({score})"
+        else:
+            sent_status = f"⚪ Netral ({score})"
+            
+        return (
+            f"<b>{item['source']} - {item['title']}</b>\n\n"
+            f"<b>Konteks:</b> {data.get('konteks', 'Berita baru')}\n\n"
+            f"<b>Dampak:</b>\n"
+            f"• <b>Crypto:</b> {data.get('crypto', '-')}\n"
+            f"• <b>Saham:</b> {data.get('saham', '-')}\n"
+            f"• <b>IHSG:</b> {data.get('ihsg', '-')}\n\n"
+            f"<b>{sent_status}</b>\n\n"
+            f"Link: {item['link']}"
+        )
+    except Exception as e:
+        log(f"Gagal parsing JSON: {e}")
+        # Fallback jika JSON rusak
+        return f"<b>{item['source']} - {item['title']}</b>\n\nAI gagal memformat teks. Silakan baca link.\n\nLink: {item['link']}"
 
 # ==========================================
 # 7. NEWS CYCLE
@@ -305,7 +303,7 @@ def run_news_cycle(label="manual"):
         news = collect_news()
         news = [n for n in news if is_relevant(n)]
         news = dedupe(news)
-        news = news[:3]
+        news = news[:3] # Maksimal 3 berita per siklus
 
         if not news:
             log("Tidak ada berita baru.")
@@ -315,14 +313,32 @@ def run_news_cycle(label="manual"):
         send_telegram(header)
 
         sent_items = []
+        # Logika Konteks (Pencarian Kata Kunci Spesifik)
+        KATA_KUNCI_KONTEKS = ["msci", "fed", "powell", "anthropic", "indonesia", "singapur", "bitcoin", "ethereum", "iran", "israel", "oil", "minyak", "etf", "sec"]
+        
         for i, item in enumerate(news, 1):
             log(f"Analisis {i}/{len(news)}: {item['title'][:60]}")
-            analysis = analyze_with_groq(item)
+            
+            history = load_json(HISTORY_PATH, [])
+            prev_context = ""
+            judul_lower = item['title'].lower()
+            
+            for h in history[-50:]:
+                h_lower = h.get("title", "").lower()
+                for kk in KATA_KUNCI_KONTEKS:
+                    if kk in judul_lower and kk in h_lower and h['title'] != item['title']:
+                        prev_context = f"Sebelumnya: {h['title']}"
+                        break
+                if prev_context: break
+            
+            analysis = analyze_with_groq(item, prev_context)
             msg = format_news_message(item, analysis)
+            
             if send_telegram(msg):
                 sent_items.append(item)
             time.sleep(2)
 
+        # Simpan ke history
         history = load_json(HISTORY_PATH, [])
         for item in sent_items:
             history.append({
@@ -344,16 +360,14 @@ def run_news_cycle(label="manual"):
 # ==========================================
 def get_crypto_change_1h(symbol):
     cid = config.WATCHLIST_CRYPTO.get(symbol.upper())
-    if not cid:
-        return None
+    if not cid: return None
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{cid}/market_chart"
         r = requests.get(url, params={"vs_currency": "usd", "days": "1"}, timeout=15)
-        if r.status_code != 200:
-            return None
+        if r.status_code != 200: return None
         prices = r.json().get("prices", [])
-        if len(prices) < 2:
-            return None
+        if len(prices) < 2: return None
+        
         now_ms = prices[-1][0]
         one_hour_ago = now_ms - 3600 * 1000
         past_price = None
@@ -361,8 +375,7 @@ def get_crypto_change_1h(symbol):
             if ts >= one_hour_ago:
                 past_price = p
                 break
-        if past_price is None:
-            past_price = prices[0][1]
+        if past_price is None: past_price = prices[0][1]
         current = prices[-1][1]
         change_pct = ((current - past_price) / past_price) * 100
         return {"symbol": symbol, "current": current, "change_1h": change_pct}
@@ -371,12 +384,10 @@ def get_crypto_change_1h(symbol):
         return None
 
 def check_price_alerts():
-    if is_paused():
-        return
+    if is_paused(): return
     for symbol in config.WATCHLIST_CRYPTO:
         data = get_crypto_change_1h(symbol)
-        if not data:
-            continue
+        if not data: continue
         change = data["change_1h"]
         if abs(change) >= config.CRYPTO_ALERT_1H:
             arrow = "NAIK" if change > 0 else "TURUN"
@@ -386,7 +397,7 @@ def check_price_alerts():
         time.sleep(3)
 
 # ==========================================
-# 9. FETCH COIN DETAIL (FITUR /CEK)
+# 9. FETCH COIN DETAIL
 # ==========================================
 def get_coin_detail(symbol):
     try:
@@ -400,7 +411,6 @@ def get_coin_detail(symbol):
             if c["symbol"].upper() == symbol.upper():
                 coin_id = c["id"]
                 break
-        
         if not coin_id: return None
 
         detail_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}"
@@ -438,8 +448,7 @@ def check_telegram_commands():
             params["offset"] = last_update_id + 1
 
         r = requests.get(url, params=params, timeout=15)
-        if r.status_code != 200:
-            return
+        if r.status_code != 200: return
             
         updates = r.json().get("result", [])
         for upd in updates:
@@ -448,11 +457,8 @@ def check_telegram_commands():
             text = msg.get("text", "").strip()
             chat_id = str(msg.get("chat", {}).get("id", ""))
             
-            if chat_id != str(config.TELEGRAM_CHAT_ID):
-                continue
-                
-            if text.startswith("/"):
-                handle_command(text)
+            if chat_id != str(config.TELEGRAM_CHAT_ID): continue
+            if text.startswith("/"): handle_command(text)
     except Exception as e:
         log(f"Command check error: {e}")
 
@@ -460,38 +466,31 @@ def handle_command(text):
     cmd = text.split()[0].lower()
 
     if cmd in ("/start", "/help"):
-        send_telegram("<b>Bot Berita Finansial</b>\n\nCommand:\n/now - berita terbaru\n/btc - berita Bitcoin\n/ihsg - berita IHSG\n/msci - berita MSCI\n/flow - harga crypto\n/cek TICKER - cek fundamental koin (contoh: /cek BTC)\n/pause - matikan notif\n/resume - nyalakan notif\n/status - cek status bot")
+        send_telegram("<b>Bot Berita Finansial</b>\n\nCommand:\n/now - berita terbaru\n/btc - berita Bitcoin\n/ihsg - berita IHSG\n/msci - berita MSCI\n/flow - harga crypto\n/cek TICKER - cek fundamental koin\n/pause - matikan notif\n/resume - nyalakan notif\n/status - cek status bot")
 
     elif cmd == "/pause":
         PAUSE_PATH.write_text("paused")
-        send_telegram("Bot di-pause. Kirim /resume buat nyalain lagi.")
-
+        send_telegram("Bot di-pause.")
     elif cmd == "/resume":
-        if PAUSE_PATH.exists():
-            PAUSE_PATH.unlink()
+        if PAUSE_PATH.exists(): PAUSE_PATH.unlink()
         send_telegram("Bot aktif lagi.")
-
     elif cmd == "/status":
         history = load_json(HISTORY_PATH, [])
         paused = "PAUSED" if is_paused() else "AKTIF"
-        send_telegram(f"Status Bot\n\nStatus: {paused}\nTotal berita tersimpan: {len(history)}\nWaktu sekarang: {now_wib().strftime('%d %b %Y %H:%M WIB')}")
-
+        send_telegram(f"Status Bot\n\nStatus: {paused}\nBerita tersimpan: {len(history)}\nWaktu: {now_wib().strftime('%d %b %Y %H:%M WIB')}")
     elif cmd == "/now":
         send_telegram("Mengambil berita terbaru...")
         run_news_cycle(label="Manual")
-
     elif cmd in ("/btc", "/eth", "/ihsg", "/msci"):
         keyword = cmd[1:].upper()
         history = load_json(HISTORY_PATH, [])
         matched = [h for h in history if keyword.lower() in h.get("title", "").lower()][-5:]
         if matched:
             msg = f"Berita {keyword} (5 terakhir)\n\n"
-            for h in matched:
-                msg += f"{h['title']}\n{h['source']} - {h['time'][:16]}\n{h['link']}\n\n"
+            for h in matched: msg += f"{h['title']}\n{h['source']} - {h['time'][:16]}\n{h['link']}\n\n"
             send_telegram(msg)
         else:
             send_telegram(f"Tidak ada berita {keyword} tersimpan.")
-
     elif cmd == "/flow":
         send_telegram("<b>Harga Crypto Terbaru</b>\n\nMengambil data...")
         try:
@@ -511,48 +510,34 @@ def handle_command(text):
                 send_telegram(msg)
         except Exception as e:
             send_telegram(f"Error: {e}")
-
     elif cmd.startswith("/cek"):
         parts = text.split()
         if len(parts) < 2:
             send_telegram("Format salah. Contoh: <code>/cek BTC</code>")
             return
-        
         ticker = parts[1].upper()
-        send_telegram(f"Mencari data untuk <b>{ticker}</b>... (butuh beberapa detik)")
-        
+        send_telegram(f"Mencari data untuk <b>{ticker}</b>...")
         data = get_coin_detail(ticker)
         if not data:
-            send_telegram(f"Koin dengan ticker <b>{ticker}</b> tidak ditemukan di CoinGecko.")
+            send_telegram(f"Koin <b>{ticker}</b> tidak ditemukan di CoinGecko.")
             return
         
         def f_usd(x): return f"${x:,.0f}" if x else "Tidak disebutkan"
         def f_num(x): return f"{x:,.0f}" if x else "Tidak terbatas / Tidak disebutkan"
         
         header = f"<b>{data['name']} ({data['symbol']})</b>\n\n"
-        stats = (
-            f"<b>Data Angka:</b>\n"
-            f"• Harga: {f_usd(data['price'])}\n"
-            f"• Market Cap: {f_usd(data['market_cap'])}\n"
-            f"• Volume 24j: {f_usd(data['volume'])}\n"
-            f"• Supply Beredar: {f_num(data['circ_supply'])}\n"
-            f"• Max Supply: {f_num(data['max_supply'])}\n\n"
-        )
+        stats = f"<b>Data Angka:</b>\n• Harga: {f_usd(data['price'])}\n• Market Cap: {f_usd(data['market_cap'])}\n• Volume 24j: {f_usd(data['volume'])}\n• Supply Beredar: {f_num(data['circ_supply'])}\n• Max Supply: {f_num(data['max_supply'])}\n\n"
         
         send_telegram(header + stats + "Menyusun penjelasan fundamental...")
-        
         fundamental = analyze_coin_fundamental(data)
         footer = f"\n\n<i>(Catatan: Data diambil otomatis. Selalu cek whitepaper dan website resmi. Bukan saran investasi).</i>"
-        
-        final_msg = f"<b>Penjelasan Fundamental {data['symbol']}</b>\n\n{fundamental}{footer}"
-        send_telegram(final_msg)
+        send_telegram(f"<b>Penjelasan Fundamental {data['symbol']}</b>\n\n{fundamental}{footer}")
 
 # ==========================================
-# 11. MAIN ENTRY (GITHUB ACTIONS)
+# 11. MAIN ENTRY
 # ==========================================
 def main():
-    log("Bot mulai berjalan (Mode GitHub Actions).")
-    
+    log("Bot mulai berjalan.")
     download_from_gist()
 
     current = now_wib()
@@ -569,6 +554,7 @@ def main():
         current_mins = current.hour * 60 + current.minute
         sched_mins = sched_hour * 60 + sched_min
         
+        # Toleransi telat 15 menit
         if sched_mins <= current_mins <= (sched_mins + 15):
             run_key = f"{today_str}_{sched}"
             if run_key not in last_runs:
@@ -578,9 +564,8 @@ def main():
                 break
 
     if is_scheduled_time:
-        log(f"Masuk jadwal: {schedule_label}. Mengirim berita...")
+        log(f"Masuk jadwal: {schedule_label}.")
         run_news_cycle(label=f"Jadwal {schedule_label}")
-        
         state["last_runs"] = last_runs
         save_json(STATE_PATH, state)
     else:

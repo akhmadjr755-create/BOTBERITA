@@ -1,5 +1,9 @@
-requests
-feedparser
-groq
-pycoingecko
-flask
+# Library untuk HTTP Request & Parsing Berita
+requests==2.31.0
+feedparser==6.0.11
+
+# Library untuk AI (Groq)
+groq==0.9.0
+
+# Library untuk Harga Crypto
+pycoingecko==3.1.0
